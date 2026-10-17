@@ -56,9 +56,12 @@ import {
 } from "./sim";
 
 const LOOK = new THREE.Vector3(0.4, 0.15, 1.4);
+const CAM_LOOK = new THREE.Vector3();
 const AIM = new THREE.Vector3();
-const UP = new THREE.Vector3(0, 1, 0);
 const DIR = new THREE.Vector3();
+const BASE_YAW = Math.atan2(0.1, 0.8);
+const BASE_PITCH = Math.asin(0.95 / Math.hypot(0.1, 0.95, 0.8));
+const MOVE_CODES = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
 const MODE_LABEL: Record<TargetMode, string> = {
   first: "First",
   last: "Last",
@@ -212,6 +215,16 @@ export function mountGame(glCanvas: HTMLCanvasElement, fxCanvas: HTMLCanvasEleme
   let pub = 0;
   let hitstop = 0;
   let alive = true;
+  let camYaw = 0;
+  let camPitch = 0;
+  let camZoom = 1;
+  let panX = 0;
+  let panZ = 0;
+  let camUser = false;
+  const held = new Set<string>();
+  const pointers = new Map<number, { x: number; y: number }>();
+  let gesture: { id: number; x: number; y: number; lx: number; ly: number; button: number; dragged: boolean } | null = null;
+  let pinch = 0;
   const floaters: Floater[] = [];
   const unitMap = new Map<number, THREE.Group>();
   const towerMap = new Map<number, THREE.Group>();
@@ -536,21 +549,56 @@ export function mountGame(glCanvas: HTMLCanvasElement, fxCanvas: HTMLCanvasEleme
 
   function onPointerDown(ev: PointerEvent) {
     unlockAudio();
-    if (manual || phase === "menu" || phase === "paused" || phase === "victory" || phase === "defeat") return;
-    const hit = pick(ev.clientX, ev.clientY);
-    if (!hit) {
-      selected = null;
-      publish();
-      return;
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    gesture = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, lx: ev.clientX, ly: ev.clientY, button: ev.button, dragged: pointers.size > 1 };
+    glCanvas.setPointerCapture?.(ev.pointerId);
+  }
+
+  function applyLook(dx: number, dy: number, button: number, shift: boolean) {
+    camUser = true;
+    if (button === 2 || button === 1 || shift) {
+      const yaw = BASE_YAW + camYaw;
+      const scale = 0.02 * camZoom;
+      panX += (-dx * Math.cos(yaw) + dy * -Math.sin(yaw)) * scale;
+      panZ += (dx * Math.sin(yaw) + dy * -Math.cos(yaw)) * scale;
+    } else {
+      camYaw -= dx * 0.0052;
+      camPitch = THREE.MathUtils.clamp(camPitch + dy * 0.0032, -0.45, 0.42);
     }
-    if (hit.fort) {
-      act({ t: "masonry" });
-      return;
-    }
-    tryPlace(hit.pad);
+    panX = THREE.MathUtils.clamp(panX, -14, 14);
+    panZ = THREE.MathUtils.clamp(panZ, -12, 16);
   }
 
   function onPointerMove(ev: PointerEvent) {
+    const prev = pointers.get(ev.pointerId);
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (pointers.size >= 2) {
+      const pts = [...pointers.values()];
+      const a = pts[0]!;
+      const b = pts[1]!;
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinch > 0 && dist > 0) {
+        camZoom = THREE.MathUtils.clamp(camZoom * (pinch / dist), 0.52, 1.85);
+        camUser = true;
+      }
+      pinch = dist;
+      if (gesture) gesture.dragged = true;
+      hoverRing.visible = false;
+      return;
+    }
+    pinch = 0;
+    if (gesture && ev.pointerId === gesture.id) {
+      const dx = ev.clientX - gesture.lx;
+      const dy = ev.clientY - gesture.ly;
+      if (Math.hypot(ev.clientX - gesture.x, ev.clientY - gesture.y) > 7) gesture.dragged = true;
+      if (gesture.dragged && prev) {
+        applyLook(dx, dy, gesture.button, ev.shiftKey);
+        gesture.lx = ev.clientX;
+        gesture.ly = ev.clientY;
+        hoverRing.visible = false;
+        return;
+      }
+    }
     if (phase !== "playing") {
       hoverRing.visible = false;
       return;
@@ -572,7 +620,91 @@ export function mountGame(glCanvas: HTMLCanvasElement, fxCanvas: HTMLCanvasEleme
     mat.color.set(afford ? "#d4b36a" : "#c4483a");
   }
 
+  function onPointerUp(ev: PointerEvent) {
+    pointers.delete(ev.pointerId);
+    if (pointers.size < 2) pinch = 0;
+    if (!gesture || ev.pointerId !== gesture.id) return;
+    const dragged = gesture.dragged;
+    const button = gesture.button;
+    gesture = null;
+    if (pointers.size === 1) {
+      const [id, p] = [...pointers.entries()][0]!;
+      gesture = { id, x: p.x, y: p.y, lx: p.x, ly: p.y, button: 0, dragged: true };
+    }
+    if (dragged || button !== 0) return;
+    if (manual || phase === "menu" || phase === "paused" || phase === "victory" || phase === "defeat") return;
+    const hit = pick(ev.clientX, ev.clientY);
+    if (!hit) {
+      selected = null;
+      publish();
+      return;
+    }
+    if (hit.fort) {
+      act({ t: "masonry" });
+      return;
+    }
+    tryPlace(hit.pad);
+  }
+
+  function onWheel(ev: WheelEvent) {
+    ev.preventDefault();
+    camUser = true;
+    const factor = ev.deltaY > 0 ? 1.08 : 0.92;
+    camZoom = THREE.MathUtils.clamp(camZoom * factor, 0.52, 1.85);
+  }
+
+  function onContext(ev: Event) {
+    ev.preventDefault();
+  }
+
+  function resetEye() {
+    camYaw = 0;
+    camPitch = 0;
+    camZoom = 1;
+    panX = 0;
+    panZ = 0;
+    camUser = false;
+  }
+
+  function slideEye(dt: number) {
+    if (!held.size) return;
+    const yaw = BASE_YAW + camYaw;
+    const fx = -Math.sin(yaw);
+    const fz = -Math.cos(yaw);
+    const rx = Math.cos(yaw);
+    const rz = -Math.sin(yaw);
+    let ix = 0;
+    let iz = 0;
+    if (held.has("KeyW") || held.has("ArrowUp")) {
+      ix += fx;
+      iz += fz;
+    }
+    if (held.has("KeyS") || held.has("ArrowDown")) {
+      ix -= fx;
+      iz -= fz;
+    }
+    if (held.has("KeyD") || held.has("ArrowRight")) {
+      ix += rx;
+      iz += rz;
+    }
+    if (held.has("KeyA") || held.has("ArrowLeft")) {
+      ix -= rx;
+      iz -= rz;
+    }
+    if (!ix && !iz) return;
+    const len = Math.hypot(ix, iz) || 1;
+    const step = dt * (held.has("ShiftLeft") || held.has("ShiftRight") ? 14 : 7.5) * camZoom;
+    panX = THREE.MathUtils.clamp(panX + (ix / len) * step, -14, 14);
+    panZ = THREE.MathUtils.clamp(panZ + (iz / len) * step, -12, 16);
+    camUser = true;
+  }
+
   function onKey(ev: KeyboardEvent) {
+    if (MOVE_CODES.has(ev.code)) {
+      ev.preventDefault();
+      held.add(ev.code);
+      return;
+    }
     if (ev.repeat) return;
     const tag = (ev.target as HTMLElement | null)?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA") return;
@@ -622,7 +754,14 @@ export function mountGame(glCanvas: HTMLCanvasElement, fxCanvas: HTMLCanvasEleme
     } else if (ev.code === "KeyQ") {
       ev.preventDefault();
       act({ t: "speed" });
+    } else if (ev.code === "KeyR") {
+      ev.preventDefault();
+      resetEye();
     }
+  }
+
+  function onKeyUp(ev: KeyboardEvent) {
+    held.delete(ev.code);
   }
 
   function callWave() {
@@ -865,12 +1004,15 @@ export function mountGame(glCanvas: HTMLCanvasElement, fxCanvas: HTMLCanvasEleme
     const fov = (camera.fov * Math.PI) / 180;
     const distH = 9.6 / Math.tan(fov / 2);
     const distW = 12 / Math.tan(fov / 2) / Math.max(0.4, aspect);
-    const dist = Math.max(distH, distW) * (1.16 - 0.16 * intro);
-    DIR.set(0.1, 0.95, 0.8).normalize();
-    DIR.applyAxisAngle(UP, orbit);
-    camera.position.copy(LOOK).addScaledVector(DIR, dist);
-    camera.lookAt(LOOK);
+    const dist = Math.max(distH, distW) * (1.16 - 0.16 * intro) * camZoom;
+    const yaw = BASE_YAW + camYaw + orbit;
+    const pitch = THREE.MathUtils.clamp(BASE_PITCH + camPitch, 0.28, 1.28);
+    DIR.set(Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw));
+    CAM_LOOK.set(LOOK.x + panX, LOOK.y, LOOK.z + panZ);
+    camera.position.copy(CAM_LOOK).addScaledVector(DIR, dist);
+    camera.lookAt(CAM_LOOK);
     basePos.copy(camera.position);
+    sun.target.position.copy(CAM_LOOK);
     camera.updateProjectionMatrix();
   }
 
@@ -954,7 +1096,8 @@ export function mountGame(glCanvas: HTMLCanvasElement, fxCanvas: HTMLCanvasEleme
       }
     }
     intro = Math.min(1, intro + dt * (reduced ? 4 : 0.8));
-    const orbit = phase === "menu" && !reduced ? Math.sin(now / 1000 * 0.18) * 0.18 : 0;
+    slideEye(dt);
+    const orbit = phase === "menu" && !reduced && !camUser ? Math.sin(now / 1000 * 0.18) * 0.18 : 0;
     fitCamera(camera.aspect, orbit);
     if (shakeOn && trauma > 0) {
       trauma = Math.max(0, trauma - dt * 1.7);
@@ -1015,7 +1158,12 @@ export function mountGame(glCanvas: HTMLCanvasElement, fxCanvas: HTMLCanvasEleme
   publish();
   glCanvas.addEventListener("pointerdown", onPointerDown);
   glCanvas.addEventListener("pointermove", onPointerMove);
+  glCanvas.addEventListener("pointerup", onPointerUp);
+  glCanvas.addEventListener("pointercancel", onPointerUp);
+  glCanvas.addEventListener("wheel", onWheel, { passive: false });
+  glCanvas.addEventListener("contextmenu", onContext);
   window.addEventListener("keydown", onKey);
+  window.addEventListener("keyup", onKeyUp);
   const onVis = () => {
     if (document.visibilityState === "visible") resumeAudio();
   };
@@ -1031,7 +1179,12 @@ export function mountGame(glCanvas: HTMLCanvasElement, fxCanvas: HTMLCanvasEleme
       ro.disconnect();
       glCanvas.removeEventListener("pointerdown", onPointerDown);
       glCanvas.removeEventListener("pointermove", onPointerMove);
+      glCanvas.removeEventListener("pointerup", onPointerUp);
+      glCanvas.removeEventListener("pointercancel", onPointerUp);
+      glCanvas.removeEventListener("wheel", onWheel);
+      glCanvas.removeEventListener("contextmenu", onContext);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("pointerdown", unlockAudio);
       renderer.dispose();

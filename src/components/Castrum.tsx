@@ -158,7 +158,7 @@ export function Castrum() {
             <ol className="steps">
               <li>Choose an engine and set it on a stone pad.</li>
               <li>Raise the castrum — click the fort, or the masonry order.</li>
-              <li>Sound the bucina when you want the next host.</li>
+              <li>Drag the field to look around. WASD or arrows slide. Scroll zooms. R resets.</li>
             </ol>
             <div className="menu-actions">
               <button className="primary" data-testid="begin" onClick={() => press({ t: "start" })}>
@@ -217,8 +217,10 @@ export function Castrum() {
             </header>
             <p>
               Engines shoot whoever is furthest down the road unless you change their aim. First protects the gate.
-              Stones and oil punish armor, rams, and elephants. Keys: 1–6 arm an engine, Space calls the host, U
-              improves the selected engine, M raises the fort, T cycles aim, Q changes speed, Esc pauses.
+              Stones and oil punish armor, rams, and elephants. Drag to orbit the field, right-drag or Shift-drag to
+              slide, scroll or pinch to zoom, R resets the eye. WASD and the arrows move the view. Keys: 1–6 arm an
+              engine, Space calls the host, U improves the selected engine, M raises the fort, T cycles aim, Q changes
+              speed, Esc pauses.
             </p>
             <div className="manual-grid">
               {TOWER_KINDS.map((kind) => {
